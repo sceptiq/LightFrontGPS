@@ -1,0 +1,65 @@
+name: Release
+
+# Pushing a version tag builds the downloadable mod package and publishes it
+# as a GitHub release:
+#
+#   git tag v1.0.0 && git push origin v1.0.0
+#
+# GitHub attaches an automatic "Source code (zip)" to every release, but that
+# is the whole repository -- workflow files, developer notes and all. This job
+# builds the thing a player actually installs instead: the Mods folder, the
+# licence and the README.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A malformed Lua file does not fail loudly -- UE4SS simply does not load
+      # the mod, and that only shows up in game. Catch it before anyone
+      # downloads the release. Lua 5.4 is the version UE4SS embeds.
+      - name: Check Lua syntax
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lua5.4
+          fail=0
+          while IFS= read -r f; do
+            if luac5.4 -p "$f"; then
+              echo "ok   $f"
+            else
+              echo "FAIL $f"
+              fail=1
+            fi
+          done < <(find Mods -name '*.lua' | sort)
+          exit $fail
+
+      - name: Assemble the package
+        run: |
+          set -euo pipefail
+          name="FieldAlignGPS-${GITHUB_REF_NAME}"
+          mkdir -p "$name"
+          cp -r Mods "$name/"
+          cp LICENSE README.md "$name/"
+          zip -qr "$name.zip" "$name"
+          echo "PACKAGE=$name.zip" >> "$GITHUB_ENV"
+
+      - name: Show what went in
+        run: unzip -l "$PACKAGE"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$PACKAGE" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
