@@ -24,14 +24,19 @@ Verification means running it in game.
 
 ## The iteration loop
 
-UE4SS loads Lua only at game start, and there is no live-reload path in this repo. Every change
-costs a full restart:
+UE4SS loads Lua only at game start, so a naive change costs a full restart. `F9` avoids that for
+everything except `main.lua` and `hook.lua`:
 
-1. Copy `Mods/FieldAlignGPS` into `<game>/FarMech/Binaries/Win64/Mods/` (see README for the
-   install layout and the older-UE4SS `mods.txt` caveat).
-2. Start the game.
-3. Confirm the mod actually loaded — the log must contain `[FieldGPS] === Feld-GPS bereit ===`.
-   Without that line, any "nothing happened" report is meaningless, because the new code never ran.
+1. Copy `Mods/FieldAlignGPS` into `<game>/FarMech/Binaries/Win64/Mods/` — `deploy.ps1 -Live` does
+   exactly this and works while the game is running, because UE4SS reads the `.lua` files only at
+   load time. (See README for the install layout and the older-UE4SS `mods.txt` caveat.)
+2. Press `F9` in game.
+3. Confirm the swap actually happened — the log must contain `=== Module neu geladen ===`. Without
+   that line, any "nothing changed" report is meaningless, because the new code never ran. The
+   same applies to a cold start and `[FieldGPS] === Feld-GPS bereit ===`.
+
+Touching `main.lua` or `hook.lua` still means a restart. That is the cost of putting anything
+there, and the reason `control.lua` exists.
 
 Log: `<game>/FarMech/Binaries/Win64/UE4SS.log`, truncated on every game start.
 
@@ -44,20 +49,35 @@ written vs. read back, cross-track offset). That is the instrument for tuning th
 |---|---|
 | `K` | lane keeping on/off — the only control |
 | `L` | diagnostics + field-source report into the log |
+| `F9` | reload config/control/field/steer/vehicle/indicator in place |
 | `Ctrl+H` | UE4SS: dump full C++ SDK **with offsets** to `CXXHeaderDump/` |
 | `Ctrl+J` / `Ctrl+Num6` / `Ctrl+Num7` | UE4SS: all objects / usmap / all actors |
 
 ## Architecture
 
 ```
-main.lua       keybinds, on/off state, tickEntry, diagnostics
-hook.lua       RegisterHook on the BP tick; falls back to LoopAsync
-vehicle.lua    the tracked chassis — THE steering channel
+main.lua       keybinds, tickEntry, LoopAsync fallback, module reload  <- NOT reloadable
+hook.lua       RegisterHook on the BP tick                             <- NOT reloadable
+control.lua    the state machine: on/off, control loop, diagnostics
+vehicle.lua    the tracked chassis — steering, throttle, implement
 steer.lua      the PD controller (the only one)
 field.lua      field axis, row spacing, AB-line anchor, cross-track error
 indicator.lua  state display via the mech's headlights
 util.lua       logging, angle math, defensive UObject access
 ```
+
+### Reload, and why the split exists
+
+`F9` drops everything except `main.lua` and `hook.lua` from `package.loaded` and re-requires it,
+so tuning a gain costs a keypress instead of a game restart. That is the *reason* the state
+machine lives in `control.lua` rather than in `main.lua`: the two excluded files hold the key
+bindings and the per-frame hook closure, neither of which can be withdrawn once registered.
+Anything put in `main.lua` becomes restart-only — keep it thin.
+
+`main.lua` reaches the current modules through upvalues (`Control`, `Config`, `Util`) that the
+reload reassigns, which is what makes the already-registered keybind closures pick up new code.
+Log each reload step *before* running it: an early version hung mid-reload and the last log line
+was from `Steer.release`, with nothing after it to say where.
 
 ### The mech has two movement systems
 
@@ -88,6 +108,33 @@ working on the first try. Keep it.
 
 Because `bIsTank = true`, full steering at zero throttle spins in place. Steering is gated below
 `VehicleMinSpeed` and scaled up to `VehicleFullSteerSpeed`.
+
+The same leg module also owns the implement and the throttle, which is what lets `K` end the whole
+job rather than just the guidance:
+
+```
+AMechCharacter    StopAutoMoving()                                  <- cancels auto-drive
+ATreadsLegModule  SetAttachmentActive(bool) / IsAttachmentActive()  <- the implement
+AMechLegModule    SetHandbrake(bool) / GetHandbrake()               <- kills residual momentum
+```
+
+### Auto-drive lives on the mech, not on the chassis
+
+Cancelling auto-drive cost three wrong attempts, all on the leg module. Measured, in order:
+
+- **`SetThrottle(0, true)` does nothing.** `GetThrottle()` read back `0.0` while the mech
+  *accelerated* from 519 to 974 cm/s. The game rewrites `RawThrottleInput` every frame.
+- **`GetThrottle()` is not a readback.** It returns the value *we* just wrote, not the one the
+  component drives with. The honest reading is `GetThrottleInput()` on the movement component —
+  it showed `1.0` throughout. A readback that only echoes your own write proves nothing.
+- **`SetHandbrake(true)` stops the mech but does not cancel anything.** Speed goes to 0 with
+  throttle still at `1.0`; release the brake and it drives straight off again.
+
+`AMechCharacter::StopAutoMoving()` is the actual lever — parameterless, on the *pawn*, not the
+chassis. After it, `GetThrottleInput()` reads `0.0` and stays there. `AFarmerCharacter` carries
+the same pair plus `ToggleAutoMove()`, which is the key the player presses.
+
+There is no `IsAutoMoving()`; verify through `GetThrottleInput()` instead.
 
 ### Lane guidance, not just heading
 

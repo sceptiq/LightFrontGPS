@@ -12,126 +12,25 @@
 -- Spurhaltung fuer den Traktormodus des Mechs: der Mod richtet das
 -- Kettenfahrwerk an der Reihenrichtung des Feldes aus und haelt die Spur.
 --
---   K = Spurhaltung an/aus
---   L = Diagnose ins UE4SS-Log
+--   K  = Arbeit starten / beenden
+--   L  = Diagnose ins UE4SS-Log
+--   F9 = Module neu laden, ohne das Spiel zu beenden
 --
 -- Scheinwerfer an = Spurhaltung aktiv.
 -- Alle Parameter stehen in config.lua.
+--
+-- Diese Datei haelt nur die Teile, die sich NICHT austauschen lassen:
+-- Tastenbelegung, Tick-Hook und die Rueckfallschleife. Die eigentliche
+-- Steuerung steht in control.lua und ist damit nachladbar.
 
-local Config    = require("config")
-local Util      = require("util")
-local Field     = require("field")
-local Steer     = require("steer")
-local Indicator = require("indicator")
-local Hook      = require("hook")
-local Vehicle   = require("vehicle")
-
--------------------------------------------------------------------------------
--- Zustand
--------------------------------------------------------------------------------
-local active         = false   -- Spurhaltung an?
-local targetYaw      = nil     -- angepeilte Fahrtrichtung
-local lastYaw        = nil     -- Yaw des letzten Frames, fuer die Drehrate
-local retargetTimer  = 0.0
-local lastError      = 0.0
-local flagAvailable  = false   -- laesst sich der Traktormodus abfragen?
-local activeMechName = nil     -- Ersatzpruefung, falls nicht
+local Config  = require("config")
+local Util    = require("util")
+local Hook    = require("hook")
+local Control = require("control")
 
 local loopRunning  = false
 local lastTickTime = nil
-
--------------------------------------------------------------------------------
--- Zielwinkel neu bestimmen und uebernehmen.
---
--- allowJump = true erlaubt beliebige Spruenge (beim Einschalten), sonst wird
--- ein zu grosser Sprung verworfen.
--------------------------------------------------------------------------------
-local function refreshTarget(mech, allowJump)
-    local newYaw, source = Field.pickTargetYaw(mech)
-    if not newYaw then return false, source end
-
-    if targetYaw and not allowJump then
-        local delta = math.abs(Util.normalizeAngle(newYaw - targetYaw))
-        if delta > Config.RetargetMaxDelta then return true, nil end
-    end
-
-    targetYaw = newYaw
-    return true, source
-end
-
--------------------------------------------------------------------------------
--- Regelkreis
--------------------------------------------------------------------------------
-local function turnOff(reason)
-    if not active then return end
-
-    active     = false
-    targetYaw  = nil
-    lastYaw    = nil
-
-    local mech = Util.getLocalMech()
-    Steer.release(mech)
-    Indicator.restore(mech)
-    Field.setAnchor(nil)   -- Bezugslinie verwerfen
-
-    Util.log("Spurhaltung aus%s", reason and (" (" .. reason .. ")") or "")
-end
-
-local function onTick(dt, mech)
-    if not Util.isValid(mech) then
-        turnOff("Mech nicht mehr gueltig")
-        return
-    end
-
-    -- Nach dem Aussteigen liefert der Controller den Farmer statt des Mechs.
-    -- Auf keinen Fall weiterfuehren.
-    if flagAvailable then
-        if Util.getTransformedState(mech) ~= true then
-            turnOff("Traktormodus verlassen")
-            return
-        end
-    elseif Util.fullName(mech) ~= activeMechName then
-        turnOff("Pawn gewechselt")
-        return
-    end
-
-    local yaw = Util.getYaw(mech)
-    if not yaw then return end
-
-    -- Ziel regelmaessig nachfuehren, damit es nach einer Kehre auf die
-    -- Gegenrichtung umspringt, statt den Mech zurueckzudrehen.
-    retargetTimer = retargetTimer + dt
-    if retargetTimer >= Config.RetargetInterval then
-        retargetTimer = 0.0
-        refreshTarget(mech, false)
-    end
-    if not targetYaw then return end
-
-    local yawRate = 0.0
-    if lastYaw then yawRate = Util.normalizeAngle(yaw - lastYaw) / dt end
-    lastYaw = yaw
-
-    lastError = Util.normalizeAngle(targetYaw - yaw)
-
-    Indicator.set(mech, true)
-
-    local speed = Util.getForwardSpeed(mech, yaw)
-    local _, playerVec = Steer.getPlayerInput(mech)
-
-    -- Steuert der Spieler deutlich woanders hin, wird nicht dagegengehalten.
-    -- Die Spurhaltung bleibt dabei an und greift wieder, sobald er loslaesst
-    -- -- so laesst sich am Vorgewende normal wenden.
-    local deviation = Steer.playerDeviation(playerVec, targetYaw)
-    if deviation and deviation > Config.PlayerOverrideDegrees then
-        Steer.release(mech)
-        return
-    end
-
-    Steer.applyVehicle(mech, targetYaw, dt, yawRate, speed)
-
-    Util.verbose("err=%.2f rate=%.2f lenk=%.3f tempo=%.0f",
-                 lastError, yawRate, Steer.lastSteer, speed)
-end
+local reloading    = false
 
 -------------------------------------------------------------------------------
 -- Gemeinsamer Einstieg fuer Hook und LoopAsync
@@ -146,9 +45,24 @@ local frameStamp = nil   -- Spielzeit des zuletzt verarbeiteten Frames
 local mechCache  = nil   -- gemerkter eigener Mech
 local mechAge    = 0     -- wie viele Frames er schon gilt
 
+-- Ist etwas zu tun? Die Antwort gehoert nach control.lua, weil sich nur das
+-- neu laden laesst -- steht die Bedingung hier, kostet jeder neue Zustand
+-- einen Spielneustart. Der Rueckfall auf Control.active traegt einen aelteren
+-- Stand von control.lua, falls dort busy() noch fehlt.
+local function busy()
+    local f = Control.busy
+    if f then return f() end
+    return Control.active == true
+end
+
 local function tickEntry(dt, mech)
+    -- Waehrend die Module getauscht werden, hier nichts anfassen.
+    if reloading then return end
+
     -- 1. Nichts zu tun? Dann kostet der Mod exakt nichts.
-    if not active then return end
+    --    Die Anhaltephase nach dem Abschalten zaehlt als "zu tun": dort wird
+    --    das Gas noch kurz auf null gehalten (siehe control.lua).
+    if not busy() then return end
 
     -- 2. Eigenen Mech holen. Util.getLocalMech baut einen Klassennamen als
     --    Zeichenkette, deshalb wird das Ergebnis gemerkt und nur zweimal je
@@ -171,7 +85,7 @@ local function tickEntry(dt, mech)
         frameStamp = now
     end
 
-    onTick(dt, mechCache)
+    Control.tick(dt, mechCache)
 end
 
 -------------------------------------------------------------------------------
@@ -195,7 +109,7 @@ local function startLoop()
     local dt = Config.TickIntervalMs / 1000.0
 
     LoopAsync(Config.TickIntervalMs, function()
-        if not active then
+        if not busy() then
             loopRunning = false
             return true          -- Schleife beenden
         end
@@ -220,110 +134,77 @@ local function startLoop()
     end)
 end
 
--------------------------------------------------------------------------------
--- Einschalten
--------------------------------------------------------------------------------
+Control.startLoop = startLoop
 
--- Voraussetzungen pruefen und Ausgangszustand herstellen.
-local function prepare()
-    local mech, why = Util.getLocalMech()
-    if not mech then
-        Util.log("Nicht moeglich: %s", why or "kein Mech")
-        return nil
-    end
-
-    local inMode, modeWhy = Util.isInFieldMode(mech)
-    if not inMode then
-        Util.log("Nicht moeglich: %s", modeWhy or "falscher Modus")
-        return nil
-    end
-    if modeWhy then Util.log("Hinweis: %s", modeWhy) end
-
-    Field.invalidateCache()
-
-    local ok, source = refreshTarget(mech, true)
-    if not ok then
-        Util.log("Kein Feld erkannt: %s", source or "unbekannt")
-        return nil
-    end
-
-    lastYaw        = Util.getYaw(mech)
-    retargetTimer  = 0.0
-    flagAvailable  = (Util.getTransformedState(mech) ~= nil)
-    activeMechName = Util.fullName(mech)
-
-    return mech, source
+local function taktText()
+    if Hook.installed then return "Hook auf " .. tostring(Hook.source) end
+    if loopRunning then return "LoopAsync" end
+    return "steht"
 end
 
-local function toggle()
-    if active then
-        turnOff()
+-------------------------------------------------------------------------------
+-- Module im laufenden Spiel neu laden
+--
+-- UE4SS laedt Lua nur beim Spielstart. Ohne diesen Weg kostet jede geaenderte
+-- Zahl einen kompletten Neustart -- bei einem Regler, den man einfahren muss,
+-- ist das der Unterschied zwischen einer Sitzung und einem Abend.
+--
+-- Die Module werden aus package.loaded geworfen und neu angefordert. Die
+-- Locals oben sind Upvalues der Funktionen hier, ein Neuzuweisen wirkt also
+-- auch in tickEntry und in den Tastenbelegungen.
+--
+-- Zwei Dateien sind bewusst NICHT dabei:
+--
+--   hook.lua  Der Hook haengt an einer Closure, die tickEntry gefangen hat.
+--             Wird das Modul ersetzt, laeuft der alte Hook ins Leere und der
+--             Takt reisst ab -- ohne dass man den Grund im Log saehe.
+--   main.lua  Diese Datei. Sie haelt Tastenbelegung und Hook; beides laesst
+--             sich nicht zurueckziehen. Deshalb steht hier so wenig wie
+--             moeglich und die Steuerung in control.lua.
+-------------------------------------------------------------------------------
+local RELOADABLE = { "config", "util", "field", "vehicle", "steer",
+                     "indicator", "control" }
+
+local function reloadModules()
+    if reloading then return end
+    reloading = true
+
+    -- Jeder Schritt wird VOR seiner Ausfuehrung geloggt. Beim ersten Anlauf
+    -- blieb das Spiel im Neuladen stehen, und im Log stand als letztes die
+    -- Zeile aus Steer.release -- danach nichts. Ohne Zwischenschritte ist
+    -- nicht zu erkennen, an welcher Stelle es haengt.
+    local function schritt(t) Util.log("Neuladen: %s", t) end
+
+    schritt("Fuehrung loslassen")
+    pcall(function() Control.shutdown() end)
+
+    schritt("Module verwerfen")
+    for _, name in ipairs(RELOADABLE) do
+        package.loaded[name] = nil
+    end
+
+    schritt("Module laden")
+    local ok, err = pcall(function()
+        Config  = require("config")
+        Util    = require("util")
+        Control = require("control")
+    end)
+
+    if not ok then
+        -- Nicht Util.log: das Modul kann gerade das kaputte sein.
+        print("[FieldGPS] NEU LADEN FEHLGESCHLAGEN: " .. tostring(err) .. "\n")
+        print("[FieldGPS] Der alte Stand laeuft weiter. Fehler beheben und "
+              .. "erneut neu laden.\n")
+        reloading = false
         return
     end
 
-    local mech, source = prepare()
-    if not mech then return end
-    if not Steer.detect(mech) then return end
+    schritt("Takt wieder anhaengen")
+    Control.startLoop = startLoop
 
-    -- Die aktuelle Position wird zum Anker der Bezugslinie -- das "A" einer
-    -- AB-Linie. Der Anker friert zugleich die Feldachse ein: ab jetzt gilt
-    -- die Fahrtrichtung, die der Spieler beim Einrasten hatte, und nicht eine
-    -- Messung eine halbe Sekunde spaeter (siehe field.lua).
-    if Field.setAnchor(Util.getLocation(mech), targetYaw) then
-        Util.log("Spuranker gesetzt -- Spurabstand %.0f uu", Field.trackSpacing())
-    end
-
-    active = true
-    Indicator.set(mech, true)
-    startLoop()
-
-    Util.log("Spurhaltung an -- Spur %.0f Grad (%s), Abweichung %.1f Grad",
-             targetYaw or 0.0, source or "Feld", lastError)
-end
-
--------------------------------------------------------------------------------
--- Diagnose (Taste L)
--------------------------------------------------------------------------------
-local function debugDump()
-    Util.log("---- Diagnose ----")
-    Util.log("Spurhaltung: %s", active and "an" or "aus")
-    Util.log("Takt: %s", Hook.installed
-             and ("Hook auf " .. tostring(Hook.source))
-             or (loopRunning and "LoopAsync" or "steht"))
-
-    local mech, why = Util.getLocalMech()
-    if not mech then
-        Util.log("Mech: %s", why or "nicht gefunden")
-    else
-        Util.log("Mech: %s", Util.className(mech))
-        Util.log("Traktormodus: %s", tostring(Util.getTransformedState(mech)))
-
-        -- Das Fahrwerk ist im Traktormodus die einzig relevante Bewegung.
-        local v, vWhy = Vehicle.info(mech)
-        if v then
-            Util.log("Fahrwerk: %s", v.klasse)
-            Util.log("  Lenkung %s / Gas %s / Tempo %s / Drehzahl %s",
-                     tostring(v.steering), tostring(v.throttle),
-                     tostring(v.speed), tostring(v.rpm))
-        else
-            Util.log("Fahrwerk: nicht erreichbar (%s)", vWhy or "unbekannt")
-        end
-
-        local yaw = Util.getYaw(mech)
-        if yaw then
-            local mag = Steer.getPlayerInput(mech)
-            Util.log("Yaw: %.1f Grad, Tempo: %.0f cm/s, Eingabe: %.2f",
-                     yaw, Util.getForwardSpeed(mech, yaw), mag)
-        end
-
-        pcall(function() Field.reportSources(mech) end)
-    end
-
-    Util.log("Kachelgroesse: %.1f uu", Config.TileSize)
-    if targetYaw then
-        Util.log("Ziel: %.1f Grad, Abweichung %.2f Grad", targetYaw, lastError)
-    end
-    Util.log("------------------")
+    reloading = false
+    Util.log("=== Module neu geladen -- Spurhaltung aus, Takt: %s ===", taktText())
+    Util.log("Nicht erfasst: main.lua und hook.lua (dafuer Neustart).")
 end
 
 -------------------------------------------------------------------------------
@@ -358,17 +239,33 @@ local function bind(keyName, modNames, callback)
     end
 end
 
+-- Zwei Betriebsarten: K nur Spurhaltung, O vollautomatisch. Welche gilt,
+-- entscheidet der Parameter -- abgeschaltet wird spaeter in der Art, in der
+-- gestartet wurde (siehe control.lua).
 bind(Config.KeyLock, Config.KeyLockMods, function()
-    ExecuteInGameThread(toggle)
+    ExecuteInGameThread(function() Control.toggle(false) end)
 end)
+
+if Config.KeyAuto then
+    bind(Config.KeyAuto, Config.KeyAutoMods, function()
+        ExecuteInGameThread(function() Control.toggle(true) end)
+    end)
+end
 
 bind(Config.KeyDebugDump, Config.KeyDebugDumpMods, function()
-    ExecuteInGameThread(debugDump)
+    ExecuteInGameThread(function() Control.diagnose(taktText()) end)
 end)
 
+if Config.KeyReload then
+    bind(Config.KeyReload, Config.KeyReloadMods, function()
+        ExecuteInGameThread(reloadModules)
+    end)
+end
+
 Util.log("=== Feld-GPS bereit ===")
-Util.log("Tasten: %s Spurhaltung an/aus, %s Diagnose",
-         Config.KeyLock, Config.KeyDebugDump)
+Util.log("Tasten: %s Arbeit an/aus, %s Diagnose%s",
+         Config.KeyLock, Config.KeyDebugDump,
+         Config.KeyReload and (", " .. Config.KeyReload .. " Neuladen") or "")
 
 -------------------------------------------------------------------------------
 -- Hook nachreichen

@@ -23,7 +23,8 @@ replicates cleanly in co-op.
 
 ## Features
 
-- **One key.** <kbd>K</kbd> toggles lane keeping. Nothing else to learn.
+- **One key for the whole job.** <kbd>K</kbd> starts lane keeping; <kbd>K</kbd> again raises the
+  implement, cancels auto-drive and brings the mech to a stop, ready to turn.
 - **Per-field detection.** The row axis and row spacing are measured from the crops actually
   growing around you, so it works on every field regardless of how it is rotated.
 - **You choose the direction.** On a square field, rows and columns are equally valid. Whichever
@@ -114,6 +115,7 @@ FarMech/Binaries/Win64/Mods/FieldAlignGPS/
 ├── enabled.txt
 └── scripts/
     ├── config.lua
+    ├── control.lua
     ├── field.lua
     ├── hook.lua
     ├── indicator.lua
@@ -143,8 +145,20 @@ work in, and press <kbd>K</kbd>.
 
 | Key | Effect |
 |---|---|
-| <kbd>K</kbd> | lane keeping on/off |
+| <kbd>K</kbd> | start work / stop work |
 | <kbd>L</kbd> | write diagnostics to the UE4SS log |
+| <kbd>F9</kbd> | reload the mod's modules without restarting the game |
+
+Pressing <kbd>K</kbd> again at the end of a run **ends the whole job, not just the
+guidance**: the implement is raised, auto-drive is cancelled, the handbrake catches the
+remaining momentum, and lane keeping disengages. The mech comes to a stop with the tool
+up, ready to turn — one key instead of the usual three. Each part can be switched off
+individually with `LiftToolOnStop`, `StopAutoDriveOnStop` and `HandbrakeOnStop`.
+
+> [!NOTE]
+> Auto-drive holds the throttle at full and rewrites it every frame, so simply disengaging
+> lane keeping would leave the mech driving on unsteered. Cancelling it is what makes the
+> single keypress work.
 
 The mech's **headlights indicate the state**: on means lane keeping is active. Your previous
 headlight setting is remembered and restored when you disengage.
@@ -169,8 +183,14 @@ All settings live in
 [`Mods/FieldAlignGPS/scripts/config.lua`](Mods/FieldAlignGPS/scripts/config.lua), and every one
 of them is commented in place.
 
-> [!IMPORTANT]
-> UE4SS loads Lua mods only at game start. Restart the game after editing the config.
+> [!TIP]
+> UE4SS loads Lua mods only at game start — but you do not have to restart to try a
+> new value. Save the file, copy it into the game's `Mods` folder, and press <kbd>F9</kbd>.
+> Guidance disengages and the modules are swapped in place. The log must then read
+> `=== Module neu geladen ===`; without that line the old values are still running.
+>
+> `main.lua` and `hook.lua` are deliberately excluded — they hold the key bindings and
+> the per-frame hook, which cannot be withdrawn. Changes there still need a restart.
 
 | Symptom | Setting |
 |---|---|
@@ -179,11 +199,15 @@ of them is commented in place.
 | Steering feels jerky | raise `VehicleRateSmoothing`, lower `VehicleSlewPerSecond` |
 | Twitches on the ideal line | raise `VehicleDeadzone` |
 | Cuts in too aggressively | raise `TrackLookahead` |
+| Leaves a strip at the edge of a row | lower `VehicleDeadzone` and `TrackLookahead` |
 | Approaches the line too flat | lower `TrackLookahead` |
 | Turns while nearly stopped | raise `VehicleMinSpeed` |
 | Yields to your input too easily | raise `PlayerOverrideDegrees` |
 | Axis should follow the field while driving | `HoldAxisWhenLocked = false` |
 | No headlight indicator wanted | `UseHeadlightIndicator = false` |
+| Keep the implement down when stopping | `LiftToolOnStop = false` |
+| Keep driving when stopping | `StopAutoDriveOnStop = false` |
+| Coasts too far after stopping | raise `StopBrakeSeconds` |
 | Field not detected | raise `CropSearchRadius` |
 | <kbd>K</kbd> or <kbd>L</kbd> collide with another mod | `KeyLock`, `KeyDebugDump` |
 
@@ -235,7 +259,9 @@ constraints in it apply to anyone.
 - **No on-screen text.** Creating and displaying UMG widgets from Lua could not be made to work in
   this build: `DrawDebugLine` is compiled out and the game has no `AHUD` subclass. State is shown
   through the headlights instead.
-- **Angle and lane only.** The mod does not control throttle, turn at headlands, or lift
-  implements.
+- **No headland turns.** The mod holds a lane; it does not turn you around at the end of one.
+  Steering against it hands control back, and <kbd>K</kbd> ends the run.
+- **It does not drive for you.** Throttle and implement are only touched when you stop — the mod
+  never sets them to start or resume work.
 - Developed against the game build dated 2026-04-15. Major updates can rename classes; the
   diagnostics on <kbd>L</kbd> report what is actually present.

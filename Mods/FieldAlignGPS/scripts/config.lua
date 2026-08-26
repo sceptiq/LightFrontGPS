@@ -25,13 +25,104 @@ local Config = {}
 -- Strg oder Alt mitgedrueckt sind.
 -------------------------------------------------------------------------------
 
--- Spurhaltung an/aus. Die einzige Bedientaste des Mods.
+-- Zwei Betriebsarten, zwei Tasten.
+--
+--   K  Nur Spurhaltung. Werkzeug und Gas bedienst du selbst -- so wie in v1.
+--   O  Vollautomatisch: senkt das Geraet, gibt Gas und haelt die Spur. Ein
+--      zweiter Druck hebt aus, nimmt das Gas weg und bremst.
+--
+-- Abgeschaltet wird immer so, wie eingeschaltet wurde: Mit K gestartet, hoert
+-- K auch nur mit der Spurhaltung auf.
+--
+-- Warum nicht J: Das Spiel belegt J mit "TogglePlanning". Nachgesehen in
+-- %LOCALAPPDATA%\FarMech\Saved\Config\WindowsNoEditor\UINavInput.ini -- dort
+-- steht die vollstaendige Standardbelegung. Wirklich frei sind nur C, K, L,
+-- O, P, U und Y; Auto-Drive des Spiels liegt uebrigens auf G.
 Config.KeyLock          = "K"
 Config.KeyLockMods      = {}
+
+Config.KeyAuto          = "O"
+Config.KeyAutoMods      = {}
 
 -- Diagnose ins UE4SS-Log schreiben.
 Config.KeyDebugDump     = "L"
 Config.KeyDebugDumpMods = {}
+
+-- Module im laufenden Spiel neu laden.
+--
+-- UE4SS laedt Lua sonst nur beim Spielstart, jede geaenderte Zahl kostete also
+-- einen Neustart. Damit wirkt eine Aenderung an dieser Datei oder an
+-- field/steer/vehicle/indicator/control sofort -- Datei speichern, ins
+-- Mods-Verzeichnis kopieren, Taste druecken.
+--
+-- Nicht erfasst: main.lua und hook.lua. Beide halten Tastenbelegung und
+-- Tick-Hook, die sich nicht zurueckziehen lassen; dafuer weiterhin Neustart.
+--
+-- Auf nil setzen, um die Taste gar nicht erst zu belegen.
+Config.KeyReload        = "F9"
+Config.KeyReloadMods    = {}
+
+-------------------------------------------------------------------------------
+-- Was das Abschalten mit K sonst noch erledigt
+--
+-- Am Ende einer Bahn gehoeren drei Dinge zusammen: Werkzeug ausheben,
+-- Auto-Fahren abbrechen, Spurhaltung aus. Eingeschaltet macht K daraus einen
+-- einzigen Griff -- der Mech steht mit angehobenem Geraet bereit zum Wenden.
+--
+-- Jeder Schritt wird zurueckgelesen; das Ergebnis steht im Log.
+-------------------------------------------------------------------------------
+
+-- Anbaugeraet senken bzw. ausheben (sonst die Leertaste).
+Config.LowerToolOnStart  = true
+Config.LiftToolOnStop    = true
+
+-- Auto-Fahren des Spiels beim Start einschalten.
+--
+-- Der Mod gibt dabei NICHT selbst Gas -- er betaetigt denselben Schalter wie
+-- die Taste G. Ein StartAutoMoving() gibt es nicht; benutzt wird deshalb
+-- ToggleAutoMove(), und zwar auf dem Piloten: AMechCharacter.PilotCharacter
+-- zeigt auf den Farmer, der waehrend der Fahrt weiterexistiert und die
+-- Eingabe haelt.
+--
+-- Weil es ein Umschalter ist, wird vorher geprueft, ob das Auto-Fahren schon
+-- laeuft -- sonst wuerde der Aufruf es ausschalten.
+Config.AutoDriveOnStart  = true
+
+-- Gasstellung, die beim Start gesetzt wird (0..1).
+Config.AutoDriveThrottle = 1.0
+
+-- Achse waehrend der Fahrt sanft nachziehen.
+--
+-- Alle wieviel Weltkoordinaten-Einheiten frisch gemessen wird (1000 = 10 m),
+-- welcher Bruchteil der Abweichung uebernommen wird, und ab welcher Abweichung
+-- die Messung als Ausreisser verworfen wird.
+--
+-- Traege ausgelegt: Die Achse soll ueber die Bahn stimmen, nicht auf jede
+-- Einzelmessung reagieren. 0 als Abstand schaltet die Nachfuehrung ab.
+Config.AxisCorrectionDistance   = 1000.0
+Config.AxisCorrectionRate       = 0.35
+Config.AxisCorrectionMaxDegrees = 2.0
+
+-- Driftprotokoll: alle wieviel Sekunden eine Auswertungszeile geschrieben wird.
+-- 0 schaltet es ab. Das ist ein Messwerkzeug fuer lange Bahnen, kein
+-- Dauerbetrieb -- eine Zeile alle paar Sekunden, nicht je Frame.
+Config.DriftLogSeconds  = 3.0
+
+-- Auto-Fahren abbrechen (AMechCharacter::StopAutoMoving).
+--
+-- Ohne das faehrt der Mech nach dem Abschalten der Spurhaltung ungelenkt
+-- weiter: das Spiel schreibt Vollgas in jedem Frame nach, solange das
+-- Auto-Fahren laeuft.
+Config.StopAutoDriveOnStop = true
+
+-- Handbremse gegen den Restschwung ziehen. Am Ende des Fensters wieder loesen.
+Config.HandbrakeOnStop   = true
+
+-- Wie lange die Handbremse nach dem Abschalten gehalten wird (Sekunden).
+--
+-- Nur gegen den Restschwung: Das Gas ist zu dem Zeitpunkt schon weg. Rollt der
+-- Mech noch merklich aus, hier erhoehen.
+Config.StopBrakeSeconds = 1.5
 
 -------------------------------------------------------------------------------
 -- Feldraster
@@ -149,7 +240,17 @@ Config.VehicleKd        = 0.03
 
 -- Innerhalb dieser Abweichung wird nicht mehr gelenkt. Verhindert das
 -- Zappeln um die Ideallinie.
-Config.VehicleDeadzone  = 0.4
+-- Zusammen mit TrackLookahead bestimmt dieser Wert, wieviel Seitenversatz
+-- dauerhaft stehen bleiben darf: Der Regler sieht nur den WINKEL, und ein
+-- Versatz von TrackLookahead * tan(Totzone) erzeugt genau die Totzone.
+--
+--   0.4 Grad bei 400 uu Vorausschau  ->  2.8 uu Versatz bleiben unbemerkt
+--   0.25 Grad bei 300 uu             ->  1.3 uu
+--
+-- Enger gesetzt, weil am Rand einer Reihe sonst ein Streifen stehen blieb --
+-- das Anbaugeraet erwischt ihn nicht mehr. Faengt der Mech an zu pendeln,
+-- diesen Wert wieder anheben (und TrackLookahead dazu).
+Config.VehicleDeadzone  = 0.25
 
 -- Begrenzung des Einschlags. Kleiner = sanfter, aber traeger.
 Config.VehicleMaxSteer  = 1.0
@@ -199,7 +300,11 @@ Config.TrackEnabled = true
 -- Wie weit voraus der Zielpunkt auf der Spur liegt (Weltkoordinaten).
 -- Gross = sanftes Einscheren aus der Ferne, klein = energisches
 -- Zurueckziehen, aber Neigung zum Pendeln.
-Config.TrackLookahead = 400.0
+--
+-- 300 uu sind bei rund 330 cm/s knapp eine Sekunde Vorausschau. Enger als
+-- frueher (400), weil ein grosser Wert den Versatz zwar sanft, aber eben auch
+-- traege abbaut -- und am Reihenrand blieb dadurch ein Streifen stehen.
+Config.TrackLookahead = 300.0
 
 -- Hoechster Anstellwinkel gegen die Spur, in Grad. Begrenzt, damit der Mech
 -- nie quer zur Reihe steht.

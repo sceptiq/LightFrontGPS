@@ -123,24 +123,65 @@ end
 -- alle vier Fahrtrichtungen.
 --
 -- Rueckgabe: yaw, Abstand   ODER   nil
+-- Gemittelt ueber ALLE Punkte, nicht nur ueber ein Paar.
+--
+-- Die fruehere Fassung nahm den naechsten Punkt und dessen naechsten Nachbarn
+-- -- ein einziges Paar. Bei 150 uu Reihenabstand ist das ein sehr kurzer
+-- Hebel: Gemessen schwankte die Achse dadurch um bis zu 0.5 Grad, und weil sie
+-- beim Einrasten eingefroren wird, rechnet sich das ueber die Bahn hoch. 0.35
+-- Grad sind auf 133 m bereits 81 cm seitlich -- mehr als eine halbe Reihe.
+--
+-- Deshalb: fuer JEDEN Punkt die Richtung zu seinem naechsten Nachbarn nehmen
+-- und ueber alle mitteln. Der Fehler faellt dabei mit der Wurzel der Anzahl;
+-- aus 60 Fruechten wird aus 0.5 Grad rund ein Zehntel davon.
+--
+-- Gemittelt wird zirkulaer und im VIERFACHEN Winkel. Grund: Richtungen sind
+-- modulo 90 Grad gleichwertig (Reihe wie Spalte, vorwaerts wie rueckwaerts).
+-- Vervierfacht man den Winkel, wird daraus ein voller Kreis, auf dem sich
+-- sauber mitteln laesst -- ein gewoehnlicher Mittelwert aus 89 und 1 Grad
+-- ergaebe 45 statt 0.
+--
+-- Der Abstand wird als Median genommen, nicht als Mittel: Ein einzelner
+-- diagonaler Nachbar (gemessen: 336 statt 150) verzieht sonst alles.
 local function axisFromPoints(pts)
-    local a = nil
-    for _, p in ipairs(pts) do
-        if a == nil or p.d < a.d then a = p end
-    end
-    if a == nil then return nil end
+    local n = #pts
+    if n < 2 then return nil end
 
-    local b, bd = nil, nil
-    for _, p in ipairs(pts) do
-        if p ~= a then
-            local dx, dy = p.x - a.x, p.y - a.y
-            local d = math.sqrt(dx * dx + dy * dy)
-            if d > 1.0 and (bd == nil or d < bd) then bd, b = d, p end
+    local sx, sy = 0.0, 0.0
+    local dists  = {}
+
+    for i = 1, n do
+        local p = pts[i]
+
+        -- Naechster Nachbar dieses Punktes.
+        local bd, bx, by = nil, nil, nil
+        for j = 1, n do
+            if j ~= i then
+                local q = pts[j]
+                local dx, dy = q.x - p.x, q.y - p.y
+                local d = math.sqrt(dx * dx + dy * dy)
+                if d > 1.0 and (bd == nil or d < bd) then
+                    bd, bx, by = d, dx, dy
+                end
+            end
+        end
+
+        if bd ~= nil then
+            local a = math.atan(by, bx)      -- Bogenmass
+            sx = sx + math.cos(4.0 * a)
+            sy = sy + math.sin(4.0 * a)
+            dists[#dists + 1] = bd
         end
     end
-    if b == nil then return nil end
 
-    return Util.normalizeAngle(math.deg(math.atan(b.y - a.y, b.x - a.x))), bd
+    if #dists == 0 then return nil end
+
+    local yaw = math.deg(math.atan(sy, sx)) / 4.0
+
+    table.sort(dists)
+    local spacing = dists[math.floor((#dists + 1) / 2)]
+
+    return Util.normalizeAngle(yaw), spacing
 end
 
 -------------------------------------------------------------------------------
@@ -598,6 +639,58 @@ end
 
 function Field.hasAnchor()
     return anchor ~= nil and anchorYaw ~= nil
+end
+
+-- Die beim Einrasten eingefrorene Achse.
+function Field.getAnchorYaw()
+    return anchorYaw
+end
+
+-- Achse sanft nachziehen, ohne dass die Spur springt.
+--
+-- Eine Winkelkorrektur dreht die Linienschar. Bliebe der Anker dabei am
+-- Einrastpunkt stehen, wuerde sich der Versatz weit davon entfernt
+-- schlagartig aendern -- nach 130 m hebelt schon ein halbes Grad um einen
+-- Meter. Deshalb wandert der Anker auf die aktuelle Position: Die Linie dreht
+-- sich um den Mech herum.
+--
+-- Der bisherige Abstand zur Spurmitte bleibt dabei erhalten; der Mech wird
+-- also nicht kuenstlich auf die Linie gesetzt, sondern behaelt seinen Platz.
+function Field.realign(pos, newYaw)
+    if pos == nil or newYaw == nil or not Field.hasAnchor() then return false end
+
+    local cross = Field.crossTrack(pos) or 0.0
+
+    anchorYaw = newYaw
+    local r = math.rad(newYaw)
+    local nx, ny = -math.sin(r), math.cos(r)
+    anchor = { X = pos.X - cross * nx, Y = pos.Y - cross * ny }
+
+    return true
+end
+
+-- Weg ENTLANG der Bezugslinie seit dem Anker, in Weltkoordinaten.
+-- Gegenstueck zu crossTrack; zusammen ergeben beide die Position in
+-- Spurkoordinaten. Fuer die Driftdiagnose: Versatz pro Meter Fahrstrecke.
+function Field.alongTrack(pos)
+    if not Field.hasAnchor() or pos == nil then return nil end
+
+    local r = math.rad(anchorYaw)
+    local dx, dy = pos.X - anchor.X, pos.Y - anchor.Y
+    return dx * math.cos(r) + dy * math.sin(r)
+end
+
+-- Vorzeichenbehafteter Unterschied zweier Achsen, modulo 90 Grad.
+--
+-- Ohne das Modulo sind 157.56 und 67.56 Grad scheinbar 90 Grad auseinander,
+-- obwohl sie dieselbe Achse beschreiben (siehe canonAxis). Rueckgabe in
+-- (-45, 45] -- klein und mit Vorzeichen, also brauchbar als Driftmass.
+function Field.axisOffset(measured, reference)
+    if measured == nil or reference == nil then return nil end
+
+    local d = (measured - reference) % 90.0
+    if d > 45.0 then d = d - 90.0 end
+    return d
 end
 
 -- Abstand zwischen zwei Spuren.
