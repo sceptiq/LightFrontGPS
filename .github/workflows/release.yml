@@ -5,15 +5,27 @@ name: Release
 #
 #   git tag v1.0.0 && git push origin v1.0.0
 #
+# The package is named <project>-<version>.zip, where the project name comes
+# from the repository itself and the version is the tag without its leading
+# "v" -- so v1.0.0 produces LightFrontGPS-1.0.0.zip.
+#
 # GitHub attaches an automatic "Source code (zip)" to every release, but that
 # is the whole repository -- workflow files, developer notes and all. This job
-# builds the thing a player actually installs instead: the Mods folder, the
-# licence and the README.
+# builds the thing a player actually installs instead.
+#
+# Run it manually (Actions -> Release -> Run workflow) to test the packaging
+# without publishing anything: the zip is then only attached to the workflow
+# run.
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version for a test build (nothing is published)"
+        default: "0.0.0-test"
 
 permissions:
   contents: write
@@ -23,6 +35,20 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Determine package name
+        run: |
+          set -euo pipefail
+          project="${{ github.event.repository.name }}"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="${{ inputs.version }}"
+          fi
+          echo "PROJECT=$project"           >> "$GITHUB_ENV"
+          echo "VERSION=$version"           >> "$GITHUB_ENV"
+          echo "PACKAGE=$project-$version.zip" >> "$GITHUB_ENV"
+          echo "Building $project-$version.zip"
 
       # A malformed Lua file does not fail loudly -- UE4SS simply does not load
       # the mod, and that only shows up in game. Catch it before anyone
@@ -43,20 +69,30 @@ jobs:
           done < <(find Mods -name '*.lua' | sort)
           exit $fail
 
+      # Staged in a clean directory so nothing from the repository can leak in.
+      # The zip has no wrapper folder: extracting it into
+      # FarMech/Binaries/Win64/ drops Mods/FieldAlignGPS exactly where UE4SS
+      # expects it.
       - name: Assemble the package
         run: |
           set -euo pipefail
-          name="FieldAlignGPS-${GITHUB_REF_NAME}"
-          mkdir -p "$name"
-          cp -r Mods "$name/"
-          cp LICENSE README.md "$name/"
-          zip -qr "$name.zip" "$name"
-          echo "PACKAGE=$name.zip" >> "$GITHUB_ENV"
+          stage="$(mktemp -d)"
+          pkg="$PWD/$PACKAGE"
+          cp -r Mods "$stage/"
+          cp LICENSE README.md "$stage/"
+          find "$stage" -name '.DS_Store' -delete
+          (cd "$stage" && zip -qr "$pkg" .)
+          unzip -l "$pkg"
 
-      - name: Show what went in
-        run: unzip -l "$PACKAGE"
+      - name: Attach to the workflow run
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PROJECT }}-${{ env.VERSION }}
+          path: ${{ env.PACKAGE }}
+          if-no-files-found: error
 
       - name: Publish the release
+        if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
