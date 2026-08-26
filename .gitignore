@@ -1,0 +1,8 @@
+# UE4SS output, in case the repository is checked out inside the game folder
+UE4SS.log
+CXXHeaderDump/
+*.usmap
+
+# Archives
+*.zip
+*.rar
