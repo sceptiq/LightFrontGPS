@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/logo.png" alt="Field GPS for Lightyear Frontier" width="300">
+
 # Field GPS for Lightyear Frontier
 
 **Automatic lane guidance for the harvester mech — press one key and drive straight rows.**
