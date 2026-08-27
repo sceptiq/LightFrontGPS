@@ -43,6 +43,49 @@ Log: `<game>/FarMech/Binaries/Win64/UE4SS.log`, truncated on every game start.
 `Config.VerboseTick = true` logs one controller line per frame (heading error, turn rate, steering
 written vs. read back, cross-track offset). That is the instrument for tuning the gains.
 
+## Commits and the changelog
+
+This mod is published on Nexus Mods as well as GitHub, and that side is driven by hand: the
+changelog is pasted into a web form, in BBCode rather than Markdown. Everything that can be
+prepared mechanically therefore is — but the text itself is not generated.
+
+**`CHANGELOG.md` is written by hand, and it is written for players.** Commit subjects are
+written for whoever maintains this; "split out the state machine" tells a player nothing about
+whether to download. Generating the changelog from `git log` would ship the wrong register, which
+is why the release workflow only *reformats* a hand-written section.
+
+Two formatting rules exist solely so the text survives a web form:
+
+- **One line per bullet, no hard wrapping.** Wrapped lines re-wrap badly in a textarea.
+- **No HTML.** Write `the O key`, not `<kbd>O</kbd>`. Markdown bold, links and inline code are
+  fine — the workflow converts them; anything else passes through untouched.
+
+Pushing a version tag then does the rest: the section for that version becomes the GitHub release
+body, and a BBCode and a plain-text rendering land in the workflow's **job summary**, ready to
+copy straight out of the browser with nothing to download. A version with no section is not an
+error — the release quietly falls back to GitHub's generated notes, so the changelog entry is the
+one thing to write *before* tagging.
+
+### Clean commits, because the changelog is written from them
+
+The existing history is the pattern. Imperative subject under 60 characters, no `feat:`/`fix:`
+prefixes, and a body that explains *why* with the measurement that decided it — "`GetThrottle()`
+read 0.0 while the mech accelerated from 519 to 974 cm/s" is worth more than any restatement of
+the diff.
+
+Two rules earned the hard way:
+
+- **One concern per commit.** A commit that fixed lane drift *and* added an unfinished headland
+  turn could not be released without shipping the turn — and its width measurement was wrong in a
+  way that would have made lane spacing a third too narrow. History had to be rewritten to get
+  the drift fix out. Bundling costs more than it saves.
+- **Never commit a bench-test value.** `AutoTurnEnabled`, `VerboseTick` and `DriftLogSeconds` are
+  the repeat offenders. Check them before staging, not after tagging.
+
+Commits are authored by the repository owner alone — no `Co-Authored-By` trailer. The AI
+involvement is stated openly in the README and in this file, which is the honest place for it;
+repeating it on every commit adds noise, not transparency.
+
 ## In-game keys
 
 | Key | Effect |

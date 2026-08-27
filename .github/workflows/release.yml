@@ -3,19 +3,22 @@ name: Release
 # Pushing a version tag builds the downloadable mod package and publishes it
 # as a GitHub release:
 #
-#   git tag v1.0.0 && git push origin v1.0.0
+#   git tag v1.1.0 && git push origin v1.1.0
 #
 # The package is named <project>-<version>.zip, where the project name comes
 # from the repository itself and the version is the tag without its leading
-# "v" -- so v1.0.0 produces LightFrontGPS-1.0.0.zip.
+# "v" -- so v1.1.0 produces LightFrontGPS-1.1.0.zip.
 #
 # GitHub attaches an automatic "Source code (zip)" to every release, but that
 # is the whole repository -- workflow files, developer notes and all. This job
 # builds the thing a player actually installs instead.
 #
+# It also prepares the release notes for Nexus Mods, which is driven by hand
+# and takes BBCode rather than Markdown. See "Render the changelog" below.
+#
 # Run it manually (Actions -> Release -> Run workflow) to test the packaging
 # without publishing anything: the zip is then only attached to the workflow
-# run.
+# run. Pass an existing version there to check the changelog rendering.
 
 on:
   push:
@@ -69,6 +72,77 @@ jobs:
           done < <(find Mods -name '*.lua' | sort)
           exit $fail
 
+      # The mod is published on Nexus Mods as well as here, and that side is
+      # hand-driven: the changelog is pasted into a web form, in BBCode. So the
+      # section for this version is rendered three ways -- Markdown for the
+      # GitHub release body, BBCode and plain text for Nexus -- and dropped into
+      # the job summary, where it can be copied straight out of the browser.
+      #
+      # The text is NOT generated from git log. Commit subjects are written for
+      # whoever maintains this ("split out the state machine"); a player reading
+      # a changelog needs the other register. CHANGELOG.md is written by hand
+      # for that reason, and this step only reformats it.
+      #
+      # A version with no section is not an error: the release then falls back
+      # to GitHub's generated notes. Write the entry before tagging.
+      - name: Render the changelog
+        run: |
+          set -euo pipefail
+          : > notes.md
+
+          if [ -f CHANGELOG.md ]; then
+            # Everything under "## <version>" up to the next "## ", with
+            # leading and trailing blank lines trimmed.
+            awk -v ver="$VERSION" '
+              /^## / { split(substr($0, 4), a, " "); inside = (a[1] == ver); next }
+              inside { print }
+            ' CHANGELOG.md | awk 'NF {p = 1} p' | tac | awk 'NF {p = 1} p' | tac > notes.md
+          fi
+
+          if [ ! -s notes.md ]; then
+            echo "No CHANGELOG.md section for $VERSION -- falling back to generated notes."
+            exit 0
+          fi
+
+          # Inline Markdown -> BBCode. This handles the subset the changelog
+          # actually uses: bold, links, inline code and bullets. Anything else
+          # passes through untouched, so keep the changelog plain.
+          sed -E \
+            -e 's|\*\*([^*]+)\*\*|[b]\1[/b]|g' \
+            -e 's|\[([^]]+)\]\(([^)]+)\)|[url=\2]\1[/url]|g' \
+            -e 's|`([^`]+)`|\1|g' \
+            -e 's|^- |[*]|' \
+            notes.md \
+          | awk '
+              /^\[\*\]/ { if (!inlist) { print "[list]"; inlist = 1 } print; next }
+              { if (inlist) { print "[/list]"; inlist = 0 } print }
+              END { if (inlist) print "[/list]" }
+            ' > notes.bbcode.txt
+
+          # Plain text, for anywhere that takes neither.
+          sed -E \
+            -e 's|\*\*([^*]+)\*\*|\1|g' \
+            -e 's|\[([^]]+)\]\(([^)]+)\)|\1 (\2)|g' \
+            -e 's|`([^`]+)`|\1|g' \
+            notes.md > notes.txt
+
+          {
+            echo "## Changelog for $VERSION"
+            echo
+            echo "Copy the block you need -- BBCode for the Nexus Mods description,"
+            echo "plain text for anywhere that takes neither."
+            echo
+            echo "### Nexus Mods (BBCode)"
+            echo '```'
+            cat notes.bbcode.txt
+            echo '```'
+            echo
+            echo "### Plain text"
+            echo '```'
+            cat notes.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
       # Staged in a clean directory so nothing from the repository can leak in.
       # The zip has no wrapper folder: extracting it into
       # FarMech/Binaries/Win64/ drops Mods/FieldAlignGPS exactly where UE4SS
@@ -91,11 +165,30 @@ jobs:
           path: ${{ env.PACKAGE }}
           if-no-files-found: error
 
+      # Kept out of the release itself -- players downloading the mod do not
+      # need three renderings of the changelog next to the zip.
+      - name: Attach the changelog renderings
+        uses: actions/upload-artifact@v4
+        with:
+          name: changelog-${{ env.VERSION }}
+          path: |
+            notes.md
+            notes.txt
+            notes.bbcode.txt
+          if-no-files-found: ignore
+
       - name: Publish the release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" "$PACKAGE" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes
+          set -euo pipefail
+          if [ -s notes.md ]; then
+            gh release create "$GITHUB_REF_NAME" "$PACKAGE" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" "$PACKAGE" \
+              --title "$GITHUB_REF_NAME" \
+              --generate-notes
+          fi
