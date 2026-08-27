@@ -76,16 +76,20 @@ Config.KeyReloadMods    = {}
 Config.LowerToolOnStart  = true
 Config.LiftToolOnStop    = true
 
--- Auto-Fahren des Spiels beim Start einschalten.
+-- Beim Start selbst Gas geben (nur im Vollautomatik-Modus).
 --
--- Der Mod gibt dabei NICHT selbst Gas -- er betaetigt denselben Schalter wie
--- die Taste G. Ein StartAutoMoving() gibt es nicht; benutzt wird deshalb
--- ToggleAutoMove(), und zwar auf dem Piloten: AMechCharacter.PilotCharacter
--- zeigt auf den Farmer, der waehrend der Fahrt weiterexistiert und die
--- Eingabe haelt.
+-- Das Auto-Fahren des Spiels laesst sich aus Lua NICHT einschalten. Gemessen:
+-- Die Binary kennt genau drei passende Symbole -- ToggleAutoMove (nur auf
+-- AFarmerCharacter), StopAutoMoving und den Aktionsnamen AutoMove. Ein
+-- InpActEvt_AutoMove existiert nicht, die Aktion ist also nativ gebunden und
+-- ihr Handler ueber Reflection nicht erreichbar. ToggleAutoMove auf dem
+-- Piloten laesst sich aufrufen, bewegt aber nichts.
 --
--- Weil es ein Umschalter ist, wird vorher geprueft, ob das Auto-Fahren schon
--- laeuft -- sonst wuerde der Aufruf es ausschalten.
+-- Deshalb haelt der Mod das Gas selbst, aus dem Takt heraus (siehe
+-- holdThrottle in control.lua). Ein einzelnes SetThrottle genuegt nicht: Das
+-- Spiel schreibt die Gasstellung in jedem Frame neu.
+--
+-- Das Anhalten ist davon unberuehrt -- StopAutoMoving() wirkt.
 Config.AutoDriveOnStart  = true
 
 -- Gasstellung, die beim Start gesetzt wird (0..1).
@@ -106,7 +110,7 @@ Config.AxisCorrectionMaxDegrees = 2.0
 -- Driftprotokoll: alle wieviel Sekunden eine Auswertungszeile geschrieben wird.
 -- 0 schaltet es ab. Das ist ein Messwerkzeug fuer lange Bahnen, kein
 -- Dauerbetrieb -- eine Zeile alle paar Sekunden, nicht je Frame.
-Config.DriftLogSeconds  = 3.0
+Config.DriftLogSeconds  = 0.0
 
 -- Auto-Fahren abbrechen (AMechCharacter::StopAutoMoving).
 --
